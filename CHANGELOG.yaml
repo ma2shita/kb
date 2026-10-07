@@ -1,7 +1,9 @@
 releases:
   - version: "unreleased"
     date: null
-    added: []
+    added:
+      - description: "Configurable local embedding prefixes: `local_embed_query_prefix` and `local_embed_document_prefix` support asymmetric retrieval instructions for any SentenceTransformer-compatible model. Explicit prefixes override built-in prompts; empty defaults preserve existing behavior"
+        commits: []
     fixed: []
     changed: []
     removed: []

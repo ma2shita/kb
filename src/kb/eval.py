@@ -293,6 +293,8 @@ def index_fingerprint(cfg: Config) -> str:
         "min_chunk_chars": cfg.min_chunk_chars,
         "chonkie": CHONKIE_AVAILABLE,
     }
+    if cfg.embed_method == "local" and cfg.local_embed_document_prefix:
+        key["local_embed_document_prefix"] = cfg.local_embed_document_prefix
     return hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()[:12]
 
 

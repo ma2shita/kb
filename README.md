@@ -19,7 +19,7 @@ CLI RAG tool for your docs. Index 30+ document formats (markdown, PDF, DOCX, EPU
 - **Similar documents** — find related docs using stored embeddings (no API call)
 - **30+ formats** — markdown, PDF, DOCX, PPTX, XLSX, EPUB, HTML, ODT, ODS, ODP, RTF, email (.eml), subtitles (.srt/.vtt), and plain text variants (.txt, .rst, .org, .csv, .json, .yaml, .tex, etc.)
 - **Optional code indexing** — set `index_code = true` to also index source code files (.py, .js, .ts, .go, .rs, etc.)
-- **Local or API embeddings** — local via `ibm-granite/granite-embedding-english-r2` (sentence-transformers, no API cost, fully offline, auto-detected dims) or OpenAI API — config-driven switch
+- **Local or API embeddings** — local via `ibm-granite/granite-embedding-english-r2` (sentence-transformers, no API cost, fully offline, auto-detected dims) or OpenAI API — config-driven switch, with configurable local query/document prefixes
 - **Pluggable chunking** — uses [chonkie](https://github.com/bhavnicksm/chonkie) when available, regex fallback otherwise
 - **Built-in benchmarks** — `kb eval` scores retrieval on public BEIR datasets with an API spend cap
 - **ChatGPT subscription support** — `llm_provider = "chatgpt"` runs LLM steps on your ChatGPT plan via the Codex login, no API key
@@ -170,6 +170,10 @@ sources = [
 # embed_model = "text-embedding-3-small"
 # embed_dims = 1536
 # local_embed_model = "ibm-granite/granite-embedding-english-r2"  # or "Snowflake/snowflake-arctic-embed-m-v1.5"
+# Optional text prepended before local query/document embeddings.
+# Useful for asymmetric retrieval models that require different instructions or prefixes.
+# local_embed_query_prefix = ""
+# local_embed_document_prefix = ""
 # chat_model = "gpt-6-luna"
 # llm_provider = "openai"  # "openai" (API key) or "chatgpt" (ChatGPT subscription, see below)
 # llm_reasoning_effort = "none"  # reasoning effort for gpt-5/gpt-6/o-series models
@@ -194,6 +198,31 @@ sources = [
 # index_code = false       # set true to also index source code files
 # eval_budget_usd = 10.0   # cumulative API spend cap for `kb eval`
 ```
+
+### Local embedding prefixes
+
+Some local retrieval models require different prefixes or instructions for queries and documents. Configure the exact values specified in the selected model's documentation or model card:
+
+```toml
+embed_method = "local"
+local_embed_model = "vendor/model-name"
+
+local_embed_query_prefix = "query: "
+local_embed_document_prefix = "passage: "
+```
+
+These settings apply only to local SentenceTransformer embeddings. Each prefix is prepended verbatim to every input in the batch, so include any required separating space or newline. Document inputs already include the file path and heading ancestry; the document prefix goes before that enriched text. Query inputs include the original query, any HyDE passage, and semantic query expansions.
+
+A non-empty prefix takes precedence over the model's built-in prompts, including its default prompt, without stacking instructions. Both settings default to `""`, preserving existing behavior: queries use the model's `query` prompt when available, and documents use the model's default encoding behavior.
+
+Changing the local embedding model, document embedding prefix, or embedding dimensions requires rebuilding the index:
+
+```bash
+kb reset
+kb index
+```
+
+Changing only the query prefix does not require rebuilding stored document vectors. `kb eval` uses a separate cached index when the local document prefix changes; changing only the query prefix reuses the existing document vectors.
 
 ### .kbignore
 

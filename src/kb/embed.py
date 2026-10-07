@@ -68,14 +68,21 @@ def local_embed_batch(
 ) -> list[list[float]]:
     """Embed texts using a local SentenceTransformer model.
 
-    Passes prompt_name="query" for query embeddings only when the model
-    declares prompt templates (e.g. arctic-embed). Models without prompts
-    (e.g. Granite R2) get plain encode().
+    Explicit query/document prefixes override built-in prompts. Otherwise,
+    queries use prompt_name="query" when the model declares prompt templates,
+    and documents keep the model's default encode() behavior.
     Truncates to cfg.embed_dims if set lower than the model's native output.
     """
     model = _get_embed_model(cfg.local_embed_model)
     kwargs: dict = {"normalize_embeddings": True}
-    if is_query and getattr(model, "prompts", None):
+    prefix = (
+        cfg.local_embed_query_prefix if is_query else cfg.local_embed_document_prefix
+    )
+    if prefix:
+        texts = [prefix + text for text in texts]
+        # Suppress default_prompt_name too, so built-in instructions never stack.
+        kwargs["prompt"] = ""
+    elif is_query and getattr(model, "prompts", None):
         kwargs["prompt_name"] = "query"
     embeddings = model.encode(texts, **kwargs)
 

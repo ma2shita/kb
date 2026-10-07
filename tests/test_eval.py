@@ -296,6 +296,40 @@ class TestIsolation:
         other = Config(**{**user_cfg.__dict__, "embed_model": "text-embedding-3-large"})
         assert kb_eval.index_fingerprint(user_cfg) != kb_eval.index_fingerprint(other)
 
+    def test_local_document_prefix_changes_eval_index_path(
+        self, eval_home, user_cfg, tmp_path
+    ):
+        user_cfg.embed_method = "local"
+        corpus_dir = tmp_path / "corpus"
+        original = eval_config(user_cfg, "scifact", corpus_dir)
+
+        user_cfg.local_embed_document_prefix = "passage: "
+        prefixed = eval_config(user_cfg, "scifact", corpus_dir)
+
+        assert prefixed.db_path != original.db_path
+        assert prefixed.local_embed_document_prefix == "passage: "
+
+    def test_local_query_prefix_reuses_eval_index_path(
+        self, eval_home, user_cfg, tmp_path
+    ):
+        user_cfg.embed_method = "local"
+        corpus_dir = tmp_path / "corpus"
+        original = eval_config(user_cfg, "scifact", corpus_dir)
+
+        user_cfg.local_embed_query_prefix = "query: "
+        prefixed = eval_config(user_cfg, "scifact", corpus_dir)
+
+        assert prefixed.db_path == original.db_path
+        assert prefixed.local_embed_query_prefix == "query: "
+
+    def test_local_prefixes_do_not_change_openai_index_fingerprint(self, user_cfg):
+        original = kb_eval.index_fingerprint(user_cfg)
+
+        user_cfg.local_embed_query_prefix = "query: "
+        user_cfg.local_embed_document_prefix = "passage: "
+
+        assert kb_eval.index_fingerprint(user_cfg) == original
+
     def test_fts_run_scores_real_index_without_touching_user_db(
         self, installed_dataset, eval_home, user_cfg
     ):

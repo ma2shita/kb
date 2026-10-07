@@ -31,6 +31,10 @@ sources = [
 # embed_model = "text-embedding-3-small"
 # embed_dims = 1536
 # local_embed_model = "ibm-granite/granite-embedding-english-r2"  # or "Snowflake/snowflake-arctic-embed-m-v1.5"
+# Optional prefixes for local embeddings (follow the model card; include any separator)
+# local_embed_query_prefix = ""
+# local_embed_document_prefix = ""
+# Changing the local model or document prefix requires: kb reset && kb index
 
 # LLM
 # chat_model = "gpt-6-luna"
@@ -93,6 +97,10 @@ sources = [
 # embed_model = "text-embedding-3-small"
 # embed_dims = 1536
 # local_embed_model = "ibm-granite/granite-embedding-english-r2"  # or "Snowflake/snowflake-arctic-embed-m-v1.5"
+# Optional prefixes for local embeddings (follow the model card; include any separator)
+# local_embed_query_prefix = ""
+# local_embed_document_prefix = ""
+# Changing the local model or document prefix requires: kb reset && kb index
 
 # LLM
 # chat_model = "gpt-6-luna"
@@ -140,6 +148,8 @@ class Config:
     embed_model: str = "text-embedding-3-small"
     embed_dims: int = 1536
     local_embed_model: str = "ibm-granite/granite-embedding-english-r2"
+    local_embed_query_prefix: str = ""
+    local_embed_document_prefix: str = ""
     chat_model: str = "gpt-6-luna"
     llm_provider: str = "openai"  # "openai" (API key) or "chatgpt" (Codex OAuth)
     llm_reasoning_effort: str = "none"  # for gpt-5/gpt-6/o-series models

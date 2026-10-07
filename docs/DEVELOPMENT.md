@@ -37,7 +37,7 @@ src/kb/
 ├── config.py      — .kb.toml loading, Config dataclass, secrets.toml loading
 ├── db.py          — SQLite schema, sqlite-vec connection, migrations
 ├── chunk.py       — Markdown + plain text chunking (chonkie or regex fallback)
-├── embed.py       — Embedding dispatcher: local (SentenceTransformer, Granite R2 default) or OpenAI API, auto-detected dims, with serialize/deserialize for sqlite-vec
+├── embed.py       — Embedding dispatcher: local (SentenceTransformer, Granite R2 default, configurable query/document prefixes) or OpenAI API, auto-detected dims, with serialize/deserialize for sqlite-vec
 ├── extract.py     — Text extraction registry for 30+ formats (PDF, DOCX, EPUB, HTML, ODT, etc.)
 ├── hyde.py        — HyDE: generates hypothetical answer passage (local model or LLM API) for better vector retrieval
 ├── expand.py      — Query expansion: local (Qwen3) or LLM, generates keyword + semantic variants
@@ -70,6 +70,7 @@ src/kb/
 - **HyDE best-of-two** — embeds both raw query and hypothetical passage in one batch, runs two vec queries, keeps whichever has better top-1 similarity. HyDE can only help, never hurt. Two methods: `"llm"` (OpenAI-compatible API) or `"local"` (causal LM via transformers, default Qwen/Qwen3-0.6B, no API cost). LLM method supports separate provider via `hyde_base_url`/`hyde_api_key` (e.g. Google Gemini). FTS still uses original query.
 - **Query expansion** — opt-in (`--expand`), generates keyword synonyms (`lex`) and semantic rephrasings (`vec`) via local Qwen3 or LLM, fused with primary results via multi-list weighted RRF
 - **Content-hash per chunk** — incremental indexing only re-embeds changed content
+- **Local embedding prefixes** — `local_embed_query_prefix` / `local_embed_document_prefix` prepend model-card instructions verbatim. Explicit prefixes suppress both named and default SentenceTransformer prompts; empty prefixes preserve existing encoding behavior. Changing the local model, document prefix, or dimensions requires `kb reset && kb index`. Eval cache keys include a non-empty local document prefix, but not query prefixes
 - **Config walks up from cwd** — like `.gitignore`, so `kb` works from any subdirectory
 - **Project DB in XDG data dir** — project-mode databases live at `~/.local/share/kb/projects/<hash>/kb.db` (SHA-256 of config dir), keeping WAL sidecar files out of the project directory. Explicit `db = "..."` in `.kb.toml` overrides for backward compat
 - **Tags** — comma-separated in `documents.tags` column; auto-parsed from markdown YAML frontmatter, manually managed via `kb tag`/`kb untag`

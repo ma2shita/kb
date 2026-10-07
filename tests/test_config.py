@@ -3,6 +3,8 @@
 import os
 from pathlib import Path
 
+import pytest
+
 
 from kb.config import (
     GLOBAL_DATA_DIR,
@@ -21,6 +23,8 @@ class TestConfigDataclass:
         cfg = Config()
         assert cfg.embed_model == "text-embedding-3-small"
         assert cfg.embed_dims == 1536
+        assert cfg.local_embed_query_prefix == ""
+        assert cfg.local_embed_document_prefix == ""
         assert cfg.chat_model == "gpt-6-luna"
         assert cfg.max_chunk_chars == 2000
         assert cfg.min_chunk_chars == 50
@@ -137,6 +141,19 @@ class TestProjectDbPath:
 
 
 class TestLoadToml:
+    @pytest.mark.parametrize("scope", ["project", "global"])
+    def test_loads_local_embedding_prefixes(self, tmp_path, scope):
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text(
+            'local_embed_query_prefix = "query: "\n'
+            'local_embed_document_prefix = "passage: "\n'
+        )
+
+        cfg = _load_toml(cfg_path, scope)
+
+        assert cfg.local_embed_query_prefix == "query: "
+        assert cfg.local_embed_document_prefix == "passage: "
+
     def test_loads_project_config_explicit_db(self, tmp_path):
         cfg_path = tmp_path / ".kb.toml"
         cfg_path.write_text(
@@ -257,7 +274,12 @@ class TestSaveConfig:
         save_config(cfg)  # should not raise
 
     def test_roundtrip(self, tmp_path):
-        cfg = Config(sources=["notes/", "docs/"], max_chunk_chars=3000)
+        cfg = Config(
+            sources=["notes/", "docs/"],
+            max_chunk_chars=3000,
+            local_embed_query_prefix="query: ",
+            local_embed_document_prefix="passage: ",
+        )
         cfg.config_path = tmp_path / ".kb.toml"
         cfg.config_dir = tmp_path
         save_config(cfg)
@@ -265,3 +287,5 @@ class TestSaveConfig:
         loaded = _load_toml(cfg.config_path, "project")
         assert loaded.sources == ["notes/", "docs/"]
         assert loaded.max_chunk_chars == 3000
+        assert loaded.local_embed_query_prefix == "query: "
+        assert loaded.local_embed_document_prefix == "passage: "
