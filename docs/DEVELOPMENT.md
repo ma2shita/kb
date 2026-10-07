@@ -35,7 +35,7 @@ src/kb/
 ├── api.py         — Core logic for search/ask/fts/similar/stats/list/feedback/eval (returns dicts, no I/O)
 ├── mcp_server.py  — MCP server (FastMCP, stdio) exposing kb tools for AI agents
 ├── config.py      — .kb.toml loading, Config dataclass, secrets.toml loading
-├── db.py          — SQLite schema, sqlite-vec connection, migrations
+├── db.py          — SQLite schema, sqlite-vec connection, migrations, tokenizer-aware FTS rebuilds
 ├── chunk.py       — Markdown + plain text chunking (chonkie or regex fallback)
 ├── embed.py       — Embedding dispatcher: local (SentenceTransformer, Granite R2 default, configurable query/document prefixes) or OpenAI API, auto-detected dims, with serialize/deserialize for sqlite-vec
 ├── extract.py     — Text extraction registry for 30+ formats (PDF, DOCX, EPUB, HTML, ODT, etc.)
@@ -67,6 +67,7 @@ src/kb/
 - **sqlite-vec `vec0` with cosine distance** — stores embeddings + text in auxiliary columns, avoiding JOINs at search time. Uses `distance_metric=cosine` so `1 - distance` gives true cosine similarity
 - **Reciprocal Rank Fusion** — combines vector and keyword rankings without needing score normalization
 - **FTS5 field weighting** — `fts_path` (10x), `heading` (2x), `text` (1x) via BM25 rank config. `fts_path` stores last 2 path components to avoid IDF collapse from common prefixes; filepath matches strongly boost relevance
+- **Configurable FTS5 tokenizer** — `fts_tokenizer` is validated against `porter unicode61` (default), `unicode61`, and `trigram` before opening the database. The active value is stored in `meta`; missing metadata, a changed tokenizer, or a missing FTS table triggers an FTS-only rebuild from `chunks.fts_path`, `heading`, and `text`. `_ensure_fts_index()` reuses the migration rebuild path in an explicit transaction, preserving embeddings, triggers, and BM25 weights. Trigram supports CJK substring search but does not match terms shorter than three Unicode characters
 - **HyDE best-of-two** — embeds both raw query and hypothetical passage in one batch, runs two vec queries, keeps whichever has better top-1 similarity. HyDE can only help, never hurt. Two methods: `"llm"` (OpenAI-compatible API) or `"local"` (causal LM via transformers, default Qwen/Qwen3-0.6B, no API cost). LLM method supports separate provider via `hyde_base_url`/`hyde_api_key` (e.g. Google Gemini). FTS still uses original query.
 - **Query expansion** — opt-in (`--expand`), generates keyword synonyms (`lex`) and semantic rephrasings (`vec`) via local Qwen3 or LLM, fused with primary results via multi-list weighted RRF
 - **Content-hash per chunk** — incremental indexing only re-embeds changed content

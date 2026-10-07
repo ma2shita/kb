@@ -46,6 +46,10 @@ sources = [
 # min_chunk_chars = 50
 
 # Search
+# SQLite FTS5 tokenizer: "porter unicode61" (default), "unicode61", or "trigram".
+# Use "trigram" for substring-oriented search, useful for Japanese/CJK text.
+# Changing this setting automatically rebuilds only the FTS index on next use.
+# fts_tokenizer = "porter unicode61"
 # search_threshold = 0.001  # min cosine similarity for `kb search` (0.0–1.0)
 # ask_threshold = 0.001     # min cosine similarity for `kb ask` (0.0–1.0)
 # rrf_k = 60.0              # RRF smoothing constant
@@ -107,6 +111,12 @@ sources = [
 # llm_provider = "openai"            # "openai" (API key) or "chatgpt" (ChatGPT subscription via `codex login`)
 # llm_reasoning_effort = "none"      # reasoning effort for gpt-5/gpt-6/o-series models
 
+# Search
+# SQLite FTS5 tokenizer: "porter unicode61" (default), "unicode61", or "trigram".
+# Use "trigram" for substring-oriented search, useful for Japanese/CJK text.
+# Changing this setting automatically rebuilds only the FTS index on next use.
+# fts_tokenizer = "porter unicode61"
+
 # HyDE (Hypothetical Document Embeddings)
 # hyde_enabled = true                # generate hypothetical passage before vector search
 # hyde_model = ""                    # LLM for HyDE ("" = use chat_model)
@@ -155,6 +165,7 @@ class Config:
     llm_reasoning_effort: str = "none"  # for gpt-5/gpt-6/o-series models
     max_chunk_chars: int = 2000
     min_chunk_chars: int = 50
+    fts_tokenizer: str = "porter unicode61"
     search_threshold: float = 0.001
     ask_threshold: float = 0.001
     rrf_k: float = 60.0

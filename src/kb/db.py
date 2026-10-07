@@ -7,6 +7,17 @@ import sqlite_vec
 
 from .config import SCHEMA_VERSION, Config
 
+_FTS_TOKENIZERS = {"porter unicode61", "unicode61", "trigram"}
+
+
+def _validate_fts_tokenizer(tokenizer: str) -> str:
+    if not isinstance(tokenizer, str) or tokenizer not in _FTS_TOKENIZERS:
+        raise ValueError(
+            f"Unsupported FTS tokenizer: {tokenizer!r}. "
+            f"Supported values: {', '.join(sorted(_FTS_TOKENIZERS))}"
+        )
+    return tokenizer
+
 
 def fts_path(doc_path: str) -> str:
     """Return last 2 path components for FTS indexing.
@@ -24,6 +35,7 @@ def fts_path(doc_path: str) -> str:
 
 def connect(cfg: Config) -> sqlite3.Connection:
     """Open DB, load sqlite-vec, ensure schema is current."""
+    tokenizer = _validate_fts_tokenizer(cfg.fts_tokenizer)
     cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(cfg.db_path))
     conn.row_factory = sqlite3.Row
@@ -95,9 +107,9 @@ def connect(cfg: Config) -> sqlite3.Connection:
                 )
             needs_fts_rebuild = True
         elif current == 5:
-            # Non-destructive: rebuild FTS with porter tokenizer + doc_path + fts_path
+            # Non-destructive: rebuild FTS with configured tokenizer + doc_path + fts_path
             print(
-                f"Schema upgrade v{current} -> v{SCHEMA_VERSION}, rebuilding FTS with porter tokenizer..."
+                f"Schema upgrade v{current} -> v{SCHEMA_VERSION}, rebuilding FTS with {tokenizer} tokenizer..."
             )
             for trigger in ("fts_ai", "fts_ad", "fts_au"):
                 conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
@@ -122,7 +134,7 @@ def connect(cfg: Config) -> sqlite3.Connection:
                 )
             needs_fts_rebuild = True
         elif current == 4:
-            # Non-destructive: rebuild FTS with triggers + porter tokenizer + fts_path
+            # Non-destructive: rebuild FTS with triggers + configured tokenizer + fts_path
             print(
                 f"Schema upgrade v{current} -> v{SCHEMA_VERSION}, rebuilding FTS with triggers..."
             )
@@ -238,53 +250,79 @@ def connect(cfg: Config) -> sqlite3.Connection:
             +heading TEXT
         )
     """)
-    conn.execute("""
-        CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks USING fts5(
-            doc_path,
-            heading,
-            text,
-            content='chunks',
-            content_rowid='id',
-            tokenize='porter unicode61'
-        )
-    """)
-    # Set weighted BM25: doc_path=10x, heading=2x, text=1x
-    # This makes rank column use weighted bm25 automatically for all queries
-    conn.execute("""
-        INSERT INTO fts_chunks(fts_chunks, rank)
-        VALUES('rank', 'bm25(10.0, 2.0, 1.0)')
-    """)
-    conn.execute("""
-        CREATE TRIGGER IF NOT EXISTS fts_ai AFTER INSERT ON chunks BEGIN
-            INSERT INTO fts_chunks(rowid, doc_path, heading, text)
-            VALUES (new.id, new.fts_path, new.heading, new.text);
-        END
-    """)
-    conn.execute("""
-        CREATE TRIGGER IF NOT EXISTS fts_ad AFTER DELETE ON chunks BEGIN
-            INSERT INTO fts_chunks(fts_chunks, rowid, doc_path, heading, text)
-            VALUES ('delete', old.id, old.fts_path, old.heading, old.text);
-        END
-    """)
-    conn.execute("""
-        CREATE TRIGGER IF NOT EXISTS fts_au AFTER UPDATE ON chunks BEGIN
-            INSERT INTO fts_chunks(fts_chunks, rowid, doc_path, heading, text)
-            VALUES ('delete', old.id, old.fts_path, old.heading, old.text);
-            INSERT INTO fts_chunks(rowid, doc_path, heading, text)
-            VALUES (new.id, new.fts_path, new.heading, new.text);
-        END
-    """)
-    if needs_fts_rebuild:
-        # Manual rebuild using fts_path (not doc_path) for the FTS doc_path column.
-        # Can't use FTS5's built-in 'rebuild' because content='chunks' maps
-        # FTS doc_path -> chunks.doc_path (full path), but we want truncated paths.
-        conn.execute("INSERT INTO fts_chunks(fts_chunks) VALUES('delete-all')")
-        conn.execute(
-            "INSERT INTO fts_chunks(rowid, doc_path, heading, text) "
-            "SELECT id, fts_path, heading, text FROM chunks"
-        )
-    conn.commit()
+    try:
+        _ensure_fts_index(conn, tokenizer, needs_rebuild=needs_fts_rebuild)
+    except Exception:
+        conn.close()
+        raise
     return conn
+
+
+def _ensure_fts_index(
+    conn: sqlite3.Connection, tokenizer: str, *, needs_rebuild: bool = False
+) -> None:
+    """Create or rebuild FTS atomically, preserving chunks and vector embeddings."""
+    with conn:
+        # SQLite DDL needs an explicit transaction so a failed rebuild rolls back.
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key = 'fts_tokenizer'"
+        ).fetchone()
+        fts_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='fts_chunks'"
+        ).fetchone()
+        if not fts_exists or row is None or row["value"] != tokenizer:
+            # Legacy indexes have no tokenizer metadata. Rebuild once rather than
+            # assume their tokenizer; all subsequent opens compare the stored value.
+            conn.execute("DROP TABLE IF EXISTS fts_chunks")
+            needs_rebuild = True
+
+        conn.execute(f"""
+            CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks USING fts5(
+                doc_path,
+                heading,
+                text,
+                content='chunks',
+                content_rowid='id',
+                tokenize='{tokenizer}'
+            )
+        """)
+        # Weighted BM25: truncated path=10x, heading=2x, text=1x.
+        conn.execute("""
+            INSERT INTO fts_chunks(fts_chunks, rank)
+            VALUES('rank', 'bm25(10.0, 2.0, 1.0)')
+        """)
+        conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS fts_ai AFTER INSERT ON chunks BEGIN
+                INSERT INTO fts_chunks(rowid, doc_path, heading, text)
+                VALUES (new.id, new.fts_path, new.heading, new.text);
+            END
+        """)
+        conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS fts_ad AFTER DELETE ON chunks BEGIN
+                INSERT INTO fts_chunks(fts_chunks, rowid, doc_path, heading, text)
+                VALUES ('delete', old.id, old.fts_path, old.heading, old.text);
+            END
+        """)
+        conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS fts_au AFTER UPDATE ON chunks BEGIN
+                INSERT INTO fts_chunks(fts_chunks, rowid, doc_path, heading, text)
+                VALUES ('delete', old.id, old.fts_path, old.heading, old.text);
+                INSERT INTO fts_chunks(rowid, doc_path, heading, text)
+                VALUES (new.id, new.fts_path, new.heading, new.text);
+            END
+        """)
+        if needs_rebuild:
+            # Built-in 'rebuild' would use full chunks.doc_path. Preserve fts_path.
+            conn.execute("INSERT INTO fts_chunks(fts_chunks) VALUES('delete-all')")
+            conn.execute(
+                "INSERT INTO fts_chunks(rowid, doc_path, heading, text) "
+                "SELECT id, fts_path, heading, text FROM chunks"
+            )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('fts_tokenizer', ?)",
+            (tokenizer,),
+        )
 
 
 def reset(db_path: Path):

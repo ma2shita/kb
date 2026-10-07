@@ -4,12 +4,14 @@ releases:
     added:
       - description: "Configurable local embedding prefixes: `local_embed_query_prefix` and `local_embed_document_prefix` support asymmetric retrieval instructions for any SentenceTransformer-compatible model. Explicit prefixes override built-in prompts; empty defaults preserve existing behavior"
         commits: []
+      - description: "Configurable FTS5 tokenizer: `fts_tokenizer` accepts `porter unicode61` (default), `unicode61`, or `trigram` for substring-oriented Japanese/CJK search. Tokenizer metadata detects configuration changes and automatically rebuilds only FTS, preserving vector embeddings; unsupported values are rejected"
+        commits: []
     fixed: []
     changed: []
     removed: []
     deprecated: []
     breaking: []
-    migration: null
+    migration: "Existing indexes without FTS tokenizer metadata receive a one-time FTS-only rebuild on the next database open. No embedding regeneration is required for tokenizer changes."
     contributors: []
 
   - version: "1.4.2"

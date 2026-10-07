@@ -235,9 +235,11 @@ class TestCmdSearch:
         assert result["results"][0]["doc_path"] == "docs/guide.md"
         assert any("Install kb" in row["text"] for row in result["results"])
 
+    @pytest.mark.parametrize("tokenizer", ["porter unicode61", "trigram"])
     def test_main_fts_json_keeps_config_banner_on_stderr(
-        self, populated_db, monkeypatch, capsys
+        self, populated_db, monkeypatch, capsys, tokenizer
     ):
+        populated_db.fts_tokenizer = tokenizer
         monkeypatch.setattr("sys.argv", ["kb", "fts", "install", "--json"])
         monkeypatch.setattr("kb.cli.find_config", lambda: populated_db)
         main()

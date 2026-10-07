@@ -2,9 +2,13 @@
 
 import sqlite3
 
+import pytest
 
+from kb.api import fts_core
 from kb.config import SCHEMA_VERSION, Config
-from kb.db import connect, reset
+from kb.db import connect, fts_path, reset
+from kb.embed import serialize_f32
+from kb.search import run_fts_query
 
 
 class TestConnect:
@@ -350,10 +354,12 @@ class TestConnect:
         assert "fts_au" in triggers
         conn2.close()
 
-    def test_fts_triggers_sync(self, tmp_config):
+    @pytest.mark.parametrize("tokenizer", ["porter unicode61", "unicode61", "trigram"])
+    def test_fts_triggers_sync(self, tmp_config, tokenizer):
         """FTS triggers keep fts_chunks in sync with chunks table."""
         from kb.db import fts_path
 
+        tmp_config.fts_tokenizer = tokenizer
         conn = connect(tmp_config)
         # Insert a document
         conn.execute(
@@ -385,12 +391,19 @@ class TestConnect:
         assert len(fts_rows) == 1
         assert fts_rows[0][0] == chunk_id
 
+        # Update — old terms disappear and new terms become searchable.
+        conn.execute(
+            "UPDATE chunks SET text = 'updated network' WHERE id = ?", (chunk_id,)
+        )
+        assert run_fts_query(conn, "hello", 5) == []
+        assert run_fts_query(conn, "updated", 5)[0][0] == chunk_id
+
         # Delete the chunk — trigger should remove from FTS
         conn.execute("DELETE FROM chunks WHERE id = ?", (chunk_id,))
         conn.commit()
 
         fts_rows = conn.execute(
-            "SELECT rowid FROM fts_chunks WHERE fts_chunks MATCH '\"hello\"'"
+            "SELECT rowid FROM fts_chunks WHERE fts_chunks MATCH '\"updated\"'"
         ).fetchall()
         assert len(fts_rows) == 0
         conn.close()
@@ -572,6 +585,211 @@ class TestConnect:
         conn.close()
 
 
+class TestFtsTokenizer:
+    def _insert_chunk(self, conn, text):
+        doc_path = "project/docs/guide.md"
+        conn.execute(
+            "INSERT INTO documents (path, title, type, tags) "
+            "VALUES (?, 'Guide', 'markdown', 'network')",
+            (doc_path,),
+        )
+        doc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            "INSERT INTO chunks (doc_id, chunk_index, text, heading, doc_path, fts_path) "
+            "VALUES (?, 0, ?, 'Overview', ?, ?)",
+            (doc_id, text, doc_path, fts_path(doc_path)),
+        )
+        return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    @pytest.mark.parametrize(
+        "tokenizer, matches",
+        [("porter unicode61", False), ("unicode61", False), ("trigram", True)],
+    )
+    def test_japanese_substring_search(self, tmp_config, tokenizer, matches):
+        tmp_config.fts_tokenizer = tokenizer
+        text = "高速なネットワーク接続を実現する"
+        conn = connect(tmp_config)
+        self._insert_chunk(conn, text)
+        stored = conn.execute(
+            "SELECT value FROM meta WHERE key = 'fts_tokenizer'"
+        ).fetchone()[0]
+        assert stored == tokenizer
+        conn.commit()
+        conn.close()
+
+        result = fts_core("ネットワーク", tmp_config)
+
+        assert bool(result["results"]) is matches
+        if matches:
+            assert result["results"][0]["doc_path"] == "project/docs/guide.md"
+            assert result["results"][0]["text"] == text
+
+    @pytest.mark.parametrize(
+        "tokenizer, matches", [("porter unicode61", True), ("unicode61", False)]
+    )
+    def test_english_stemming(self, tmp_config, tokenizer, matches):
+        tmp_config.fts_tokenizer = tokenizer
+        conn = connect(tmp_config)
+        self._insert_chunk(conn, "running")
+
+        rows = conn.execute(
+            "SELECT rowid FROM fts_chunks WHERE fts_chunks MATCH '\"run\"'"
+        ).fetchall()
+
+        assert bool(rows) is matches
+        conn.close()
+
+    @pytest.mark.parametrize(
+        "query, matches", [("AI", False), ("5G", False), ("IoT", True)]
+    )
+    def test_trigram_short_queries(self, tmp_config, query, matches):
+        tmp_config.fts_tokenizer = "trigram"
+        conn = connect(tmp_config)
+        self._insert_chunk(conn, "IoTでAIと5Gを接続する")
+
+        assert bool(run_fts_query(conn, query, 5)) is matches
+        conn.close()
+
+    @pytest.mark.parametrize(
+        "tokenizer",
+        [
+            "something-unsupported",
+            "trigram'); DROP TABLE documents; --",
+            "trigram case_sensitive 1",
+        ],
+    )
+    def test_invalid_tokenizer_rejected_before_creating_db(self, tmp_config, tokenizer):
+        tmp_config.fts_tokenizer = tokenizer
+
+        with pytest.raises(ValueError, match="Unsupported FTS tokenizer") as exc:
+            connect(tmp_config)
+
+        assert repr(tokenizer) in str(exc.value)
+        assert "Supported values: porter unicode61, trigram, unicode61" in str(
+            exc.value
+        )
+        assert not tmp_config.db_path.exists()
+
+    def test_tokenizer_change_preserves_documents_chunks_and_vectors(self, tmp_config):
+        tmp_config.embed_dims = 4
+        conn = connect(tmp_config)
+        text = "高速なネットワーク接続を実現する"
+        chunk_id = self._insert_chunk(conn, text)
+        conn.execute(
+            "INSERT INTO vec_chunks (chunk_id, embedding, chunk_text, doc_path, heading) "
+            "VALUES (?, ?, ?, 'project/docs/guide.md', 'Overview')",
+            (chunk_id, serialize_f32([1.0, 0.0, 0.0, 0.0]), text),
+        )
+        before = {
+            table: [tuple(row) for row in conn.execute(f"SELECT * FROM {table}")]
+            for table in ("documents", "chunks", "vec_chunks")
+        }
+        assert run_fts_query(conn, "ネットワーク", 5) == []
+        conn.commit()
+        conn.close()
+
+        for tokenizer, matches in [("trigram", True), ("porter unicode61", False)]:
+            tmp_config.fts_tokenizer = tokenizer
+            conn = connect(tmp_config)
+            after = {
+                table: [tuple(row) for row in conn.execute(f"SELECT * FROM {table}")]
+                for table in before
+            }
+            assert after == before
+            assert bool(run_fts_query(conn, "ネットワーク", 5)) is matches
+            assert run_fts_query(conn, "guide", 5)[0][0] == chunk_id
+            # Rebuild uses truncated fts_path, not the full document path.
+            assert run_fts_query(conn, "project", 5) == []
+            assert (
+                conn.execute(
+                    "SELECT value FROM meta WHERE key = 'fts_tokenizer'"
+                ).fetchone()[0]
+                == tokenizer
+            )
+            assert (
+                conn.execute(
+                    "SELECT v FROM fts_chunks_config WHERE k = 'rank'"
+                ).fetchone()[0]
+                == "bm25(10.0, 2.0, 1.0)"
+            )
+            conn.close()
+
+    @pytest.mark.parametrize("tokenizer", ["porter unicode61", "trigram"])
+    def test_legacy_index_without_metadata_rebuilds_once(self, tmp_config, tokenizer):
+        conn = connect(tmp_config)
+        chunk_id = self._insert_chunk(conn, "hello world")
+        conn.execute("DELETE FROM meta WHERE key = 'fts_tokenizer'")
+        version_before = conn.execute("PRAGMA schema_version").fetchone()[0]
+        conn.commit()
+        conn.close()
+
+        tmp_config.fts_tokenizer = tokenizer
+        conn = connect(tmp_config)
+        version_after = conn.execute("PRAGMA schema_version").fetchone()[0]
+        assert version_after > version_before
+        assert run_fts_query(conn, "hello", 5)[0][0] == chunk_id
+        assert (
+            conn.execute(
+                "SELECT value FROM meta WHERE key = 'fts_tokenizer'"
+            ).fetchone()[0]
+            == tokenizer
+        )
+        conn.close()
+
+        conn = connect(tmp_config)
+        assert conn.execute("PRAGMA schema_version").fetchone()[0] == version_after
+        assert run_fts_query(conn, "hello", 5)[0][0] == chunk_id
+        conn.close()
+
+    def test_missing_fts_table_is_repopulated(self, tmp_config):
+        conn = connect(tmp_config)
+        chunk_id = self._insert_chunk(conn, "hello world")
+        conn.execute("DROP TABLE fts_chunks")
+        conn.commit()
+        conn.close()
+
+        conn = connect(tmp_config)
+        assert run_fts_query(conn, "hello", 5)[0][0] == chunk_id
+        conn.close()
+
+    def test_failed_tokenizer_change_rolls_back(self, tmp_config, monkeypatch):
+        conn = connect(tmp_config)
+        chunk_id = self._insert_chunk(conn, "hello world")
+        conn.commit()
+        conn.close()
+        real_connect = sqlite3.connect
+
+        class NoTrigramConnection(sqlite3.Connection):
+            def execute(self, sql, parameters=()):
+                if "tokenize='trigram'" in sql:
+                    raise sqlite3.OperationalError("no such tokenizer: trigram")
+                return super().execute(sql, parameters)
+
+        def no_trigram_connect(path):
+            return real_connect(path, factory=NoTrigramConnection)
+
+        tmp_config.fts_tokenizer = "trigram"
+        with monkeypatch.context() as patch:
+            patch.setattr("kb.db.sqlite3.connect", no_trigram_connect)
+            with pytest.raises(sqlite3.OperationalError, match="no such tokenizer"):
+                connect(tmp_config)
+
+        conn = sqlite3.connect(tmp_config.db_path)
+        assert (
+            conn.execute(
+                "SELECT value FROM meta WHERE key = 'fts_tokenizer'"
+            ).fetchone()[0]
+            == "porter unicode61"
+        )
+        assert (
+            conn.execute(
+                "SELECT rowid FROM fts_chunks WHERE fts_chunks MATCH '\"hello\"'"
+            ).fetchone()[0]
+            == chunk_id
+        )
+        conn.close()
+
+
 class TestFtsPath:
     def test_short_path(self):
         from kb.db import fts_path
@@ -593,7 +811,8 @@ class TestFtsPath:
 
         assert fts_path("a/b/c/d/file.md") == "d/file.md"
 
-    def test_v7_to_v8_migration_adds_fts_path(self, tmp_config):
+    @pytest.mark.parametrize("tokenizer", ["porter unicode61", "unicode61", "trigram"])
+    def test_v7_to_v8_migration_adds_fts_path(self, tmp_config, tokenizer):
         """v7 -> v8 adds fts_path column and rebuilds FTS with truncated paths."""
         import sqlite_vec
 
@@ -685,7 +904,8 @@ class TestFtsPath:
         conn.commit()
         conn.close()
 
-        # Reconnect — should migrate v7->v8
+        # Reconnect — should migrate v7->v8 with the configured tokenizer.
+        tmp_config.fts_tokenizer = tokenizer
         conn2 = connect(tmp_config)
 
         # Data preserved
@@ -717,6 +937,14 @@ class TestFtsPath:
             "SELECT rowid FROM fts_chunks WHERE fts_chunks MATCH 'doc_path:\"project\"'"
         ).fetchall()
         assert len(fts_rows) == 0
+
+        assert bool(run_fts_query(conn2, "ontent", 5)) is (tokenizer == "trigram")
+        assert (
+            conn2.execute(
+                "SELECT value FROM meta WHERE key = 'fts_tokenizer'"
+            ).fetchone()[0]
+            == tokenizer
+        )
 
         conn2.close()
 

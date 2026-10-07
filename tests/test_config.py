@@ -7,7 +7,9 @@ import pytest
 
 
 from kb.config import (
+    GLOBAL_CONFIG_TEMPLATE,
     GLOBAL_DATA_DIR,
+    PROJECT_CONFIG_TEMPLATE,
     Config,
     _load_toml,
     _project_db_path,
@@ -28,6 +30,7 @@ class TestConfigDataclass:
         assert cfg.chat_model == "gpt-6-luna"
         assert cfg.max_chunk_chars == 2000
         assert cfg.min_chunk_chars == 50
+        assert cfg.fts_tokenizer == "porter unicode61"
         assert cfg.search_threshold == 0.001
         assert cfg.ask_threshold == 0.001
         assert cfg.rrf_k == 60.0
@@ -141,6 +144,22 @@ class TestProjectDbPath:
 
 
 class TestLoadToml:
+    @pytest.mark.parametrize("scope", ["project", "global"])
+    def test_loads_fts_tokenizer(self, tmp_path, scope):
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text('fts_tokenizer = "trigram"\n')
+
+        cfg = _load_toml(cfg_path, scope)
+
+        assert cfg.fts_tokenizer == "trigram"
+
+    @pytest.mark.parametrize(
+        "template", [PROJECT_CONFIG_TEMPLATE, GLOBAL_CONFIG_TEMPLATE]
+    )
+    def test_generated_config_documents_fts_tokenizer(self, template):
+        assert '# fts_tokenizer = "porter unicode61"' in template
+        assert '"trigram"' in template
+
     @pytest.mark.parametrize("scope", ["project", "global"])
     def test_loads_local_embedding_prefixes(self, tmp_path, scope):
         cfg_path = tmp_path / "config.toml"
@@ -277,6 +296,7 @@ class TestSaveConfig:
         cfg = Config(
             sources=["notes/", "docs/"],
             max_chunk_chars=3000,
+            fts_tokenizer="trigram",
             local_embed_query_prefix="query: ",
             local_embed_document_prefix="passage: ",
         )
@@ -287,5 +307,6 @@ class TestSaveConfig:
         loaded = _load_toml(cfg.config_path, "project")
         assert loaded.sources == ["notes/", "docs/"]
         assert loaded.max_chunk_chars == 3000
+        assert loaded.fts_tokenizer == "trigram"
         assert loaded.local_embed_query_prefix == "query: "
         assert loaded.local_embed_document_prefix == "passage: "

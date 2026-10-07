@@ -178,6 +178,11 @@ sources = [
 # llm_provider = "openai"  # "openai" (API key) or "chatgpt" (ChatGPT subscription, see below)
 # llm_reasoning_effort = "none"  # reasoning effort for gpt-5/gpt-6/o-series models
 # max_chunk_chars = 2000
+# SQLite FTS5 tokenizer.
+# "porter unicode61" — default, English-oriented text with Porter stemming
+# "unicode61"        — Unicode tokenizer without Porter stemming
+# "trigram"          — substring matching, useful for Japanese/CJK text
+# fts_tokenizer = "porter unicode61"
 # search_threshold = 0.001      # min cosine similarity for `kb search` (also --threshold flag)
 # ask_threshold = 0.001         # min cosine similarity for `kb ask` (also --threshold flag)
 # rerank_fetch_k = 20
@@ -223,6 +228,28 @@ kb index
 ```
 
 Changing only the query prefix does not require rebuilding stored document vectors. `kb eval` uses a separate cached index when the local document prefix changes; changing only the query prefix reuses the existing document vectors.
+
+### FTS5 tokenizer
+
+Choose the built-in SQLite FTS5 tokenizer that fits your document collection:
+
+| Value | Behavior |
+|---|---|
+| `porter unicode61` | Default. Unicode tokenization with English Porter stemming, preserving existing search behavior |
+| `unicode61` | Unicode tokenization without Porter stemming |
+| `trigram` | Three-character sequences for literal substring matching, useful for Japanese and other CJK text |
+
+For Japanese-heavy collections, set this in your global `config.toml` or project `.kb.toml`:
+
+```toml
+fts_tokenizer = "trigram"
+```
+
+With trigram enabled, `kb fts "ネットワーク"` can match a document containing `高速なネットワーク接続を実現する`. It also applies to the keyword-search part of `kb search` and `kb ask`. Unsupported tokenizer values are rejected with an error; tokenizer options beyond the three values above are not accepted.
+
+**Changing the tokenizer requires rebuilding the FTS index.** kb records the active tokenizer in the database's `meta` table and automatically recreates and repopulates only the FTS index on the next database open when the setting changes. Documents, chunks, tags, and vector embeddings are preserved, so no full reset or embedding API calls are needed. Older databases without tokenizer metadata receive a one-time FTS rebuild. A failed tokenizer-change rebuild rolls back to the previous FTS index.
+
+**Trigram limitations:** matching uses sequences of three Unicode characters. FTS queries shorter than three characters, such as `AI` or `5G`, do not match. `IoT` is exactly three characters and can match; longer terms such as `ネットワーク`, `フィジカルAI`, and `PrivateLink` are also suitable. Use hybrid/vector search for semantic retrieval of short terms. Trigram provides substring matching rather than Japanese word segmentation.
 
 ### .kbignore
 
