@@ -4,9 +4,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from kb.api import fts_core
 from kb.config import Config
 from kb.db import connect
-from kb.ingest import _index_file, index_directory
+from kb.ingest import _index_file, index_directory, md5_hash
 
 
 def _mock_openai_client(embed_dims=4):
@@ -29,6 +30,40 @@ def _make_cfg(tmp_path, **kwargs):
 
 
 class TestIndexDirectory:
+    def test_cjk_fts_normalization_preserves_embedding_inputs_and_reuse(self, tmp_path):
+        cfg = _make_cfg(tmp_path, fts_tokenizer="trigram")
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        raw = "車両やロボットの製\n造プロセス・ライフサイクル\nAWS IoT Core"
+        (docs / "layout.txt").write_text(raw)
+        client = _mock_openai_client()
+
+        with patch("kb.ingest.OpenAI", return_value=client):
+            index_directory(docs, cfg)
+            assert client.embeddings.create.call_args.kwargs["input"] == [
+                f"docs/layout.txt\n\n{raw}"
+            ]
+
+            conn = connect(cfg)
+            row = conn.execute("SELECT * FROM chunks").fetchone()
+            assert row["text"] == raw
+            assert row["fts_text"] == raw.replace("製\n造", "製造")
+            assert row["content_hash"] == md5_hash(raw)
+            assert (
+                conn.execute("SELECT chunk_text FROM vec_chunks").fetchone()[0] == raw
+            )
+            chunk_id = row["id"]
+            conn.close()
+
+            result = fts_core("製造プロセス", cfg)
+            assert result["results"][0]["text"] == raw
+            index_directory(docs, cfg)
+
+        client.embeddings.create.assert_called_once()
+        conn = connect(cfg)
+        assert conn.execute("SELECT id FROM chunks").fetchone()[0] == chunk_id
+        conn.close()
+
     def test_indexes_md_files(self, tmp_path):
         cfg = _make_cfg(tmp_path)
         docs = tmp_path / "docs"

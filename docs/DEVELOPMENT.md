@@ -36,6 +36,7 @@ src/kb/
 ├── mcp_server.py  — MCP server (FastMCP, stdio) exposing kb tools for AI agents
 ├── config.py      — .kb.toml loading, Config dataclass, secrets.toml loading
 ├── db.py          — SQLite schema, sqlite-vec connection, migrations, tokenizer-aware FTS rebuilds
+├── fts.py         — Conservative CJK whitespace normalization for the FTS-only text representation
 ├── chunk.py       — Markdown + plain text chunking (chonkie or regex fallback)
 ├── embed.py       — Embedding dispatcher: local (SentenceTransformer, Granite R2 default, configurable query/document prefixes) or OpenAI API, auto-detected dims, with serialize/deserialize for sqlite-vec
 ├── extract.py     — Text extraction registry for 30+ formats (PDF, DOCX, EPUB, HTML, ODT, etc.)
@@ -52,7 +53,7 @@ src/kb/
 
 ### Data flow
 
-**Indexing** (`kb index`): find files by extension → extract text (format-specific) → chunking → content-hash diff → embed new chunks (local SentenceTransformer or OpenAI API, based on `embed_method`) → store in sqlite-vec (vec0) + FTS5
+**Indexing** (`kb index`): find files by extension → extract text (format-specific) → chunking → content-hash diff → embed new raw chunks (local SentenceTransformer or OpenAI API, based on `embed_method`) → store raw text in sqlite-vec (vec0), with triggers deriving normalized `fts_text` for FTS5
 
 **Search** (`kb search`): query → parse filters → [HyDE best-of-two: embed raw query + passage, keep better vec results] → [expand] → vector search (vec0 cosine) + FTS5 (original + expansion queries; SQL-level pre-filtered to tagged chunk IDs if `tag:` active) → multi-list weighted RRF (primary 2x, expansions 1x) → apply remaining filters → results
 
@@ -67,7 +68,8 @@ src/kb/
 - **sqlite-vec `vec0` with cosine distance** — stores embeddings + text in auxiliary columns, avoiding JOINs at search time. Uses `distance_metric=cosine` so `1 - distance` gives true cosine similarity
 - **Reciprocal Rank Fusion** — combines vector and keyword rankings without needing score normalization
 - **FTS5 field weighting** — `fts_path` (10x), `heading` (2x), `text` (1x) via BM25 rank config. `fts_path` stores last 2 path components to avoid IDF collapse from common prefixes; filepath matches strongly boost relevance
-- **Configurable FTS5 tokenizer** — `fts_tokenizer` is validated against `porter unicode61` (default), `unicode61`, and `trigram` before opening the database. The active value is stored in `meta`; missing metadata, a changed tokenizer, or a missing FTS table triggers an FTS-only rebuild from `chunks.fts_path`, `heading`, and `text`. `_ensure_fts_index()` reuses the migration rebuild path in an explicit transaction, preserving embeddings, triggers, and BM25 weights. Trigram supports CJK substring search but does not match terms shorter than three Unicode characters
+- **Configurable FTS5 tokenizer** — `fts_tokenizer` is validated against `porter unicode61` (default), `unicode61`, and `trigram` before opening the database. The active value is stored in `meta`; missing metadata, a changed tokenizer, or a missing FTS table triggers an FTS-only rebuild from `chunks.fts_path`, `heading`, and `fts_text`. `_ensure_fts_index()` reuses the migration rebuild path in an explicit transaction, preserving embeddings, triggers, and BM25 weights. Trigram supports CJK substring search but does not match terms shorter than three Unicode characters
+- **FTS-only normalization** — `normalize_text_for_fts()` removes whitespace only between adjacent Hiragana, Katakana, or CJK ideographs. `connect()` registers the helper as a deterministic SQLite function; insert/update triggers populate `chunks.fts_text` while keeping raw `text`, hashes, and vector inputs intact. Updates to the derived column do not recursively fire the FTS update trigger. The `fts_chunks_content` view maps FTS columns to `fts_path` and `fts_text`, so even FTS5's built-in rebuild reads normalized content. Schema v9→v10 adds and backfills `fts_text` and rebuilds only FTS. `meta.fts_normalization_version` tracks `FTS_NORMALIZATION_VERSION` from `fts.py`; bump it when the normalization rules change to regenerate only the FTS representation
 - **HyDE best-of-two** — embeds both raw query and hypothetical passage in one batch, runs two vec queries, keeps whichever has better top-1 similarity. HyDE can only help, never hurt. Two methods: `"llm"` (OpenAI-compatible API) or `"local"` (causal LM via transformers, default Qwen/Qwen3-0.6B, no API cost). LLM method supports separate provider via `hyde_base_url`/`hyde_api_key` (e.g. Google Gemini). FTS still uses original query.
 - **Query expansion** — opt-in (`--expand`), generates keyword synonyms (`lex`) and semantic rephrasings (`vec`) via local Qwen3 or LLM, fused with primary results via multi-list weighted RRF
 - **Content-hash per chunk** — incremental indexing only re-embeds changed content

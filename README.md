@@ -251,6 +251,10 @@ With trigram enabled, `kb fts "ネットワーク"` can match a document contain
 
 **Trigram limitations:** matching uses sequences of three Unicode characters. FTS queries shorter than three characters, such as `AI` or `5G`, do not match. `IoT` is exactly three characters and can match; longer terms such as `ネットワーク`, `フィジカルAI`, and `PrivateLink` are also suitable. Use hybrid/vector search for semantic retrieval of short terms. Trigram provides substring matching rather than Japanese word segmentation.
 
+**CJK layout whitespace:** before FTS indexing, kb removes whitespace between adjacent Hiragana, Katakana, and CJK ideographs (including common extension ranges). This repairs words split by PDF/PPTX line wrapping, for example `製\n造プロセス` → `製造プロセス`. Spaces, tabs, LF, and CRLF are handled; English word boundaries (`AWS IoT Core`), mixed-script spaces (`AWS 環境`, `5G ネットワーク`), and whitespace next to punctuation are preserved.
+
+This normalization is enabled by default for all supported FTS tokenizers. The normalized representation is stored separately in `chunks.fts_text`; the original `chunks.text` is preserved for vector embeddings, content hashes, and displayed snippets. Existing indexes are automatically upgraded to schema v10 and receive an FTS-only rebuild, with no need to regenerate embeddings or run `kb reset`. The normalization version is also tracked in `meta` so future normalization changes can rebuild FTS without re-embedding documents.
+
 ### .kbignore
 
 Drop a `.kbignore` in any source directory to exclude files from indexing. Uses fnmatch glob syntax with `#` comments.

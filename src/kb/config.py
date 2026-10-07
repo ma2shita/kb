@@ -8,7 +8,7 @@ from pathlib import Path
 
 PROJECT_CONFIG_FILE = ".kb.toml"
 SECRETS_PATH = Path.home() / ".config" / "kb" / "secrets.toml"
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 GLOBAL_CONFIG_DIR = Path.home() / ".config" / "kb"
 GLOBAL_CONFIG_FILE = GLOBAL_CONFIG_DIR / "config.toml"
@@ -49,6 +49,7 @@ sources = [
 # SQLite FTS5 tokenizer: "porter unicode61" (default), "unicode61", or "trigram".
 # Use "trigram" for substring-oriented search, useful for Japanese/CJK text.
 # Changing this setting automatically rebuilds only the FTS index on next use.
+# CJK layout whitespace is normalized for FTS only; original text is preserved.
 # fts_tokenizer = "porter unicode61"
 # search_threshold = 0.001  # min cosine similarity for `kb search` (0.0–1.0)
 # ask_threshold = 0.001     # min cosine similarity for `kb ask` (0.0–1.0)
@@ -115,6 +116,7 @@ sources = [
 # SQLite FTS5 tokenizer: "porter unicode61" (default), "unicode61", or "trigram".
 # Use "trigram" for substring-oriented search, useful for Japanese/CJK text.
 # Changing this setting automatically rebuilds only the FTS index on next use.
+# CJK layout whitespace is normalized for FTS only; original text is preserved.
 # fts_tokenizer = "porter unicode61"
 
 # HyDE (Hypothetical Document Embeddings)

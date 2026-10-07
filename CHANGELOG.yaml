@@ -6,12 +6,14 @@ releases:
         commits: []
       - description: "Configurable FTS5 tokenizer: `fts_tokenizer` accepts `porter unicode61` (default), `unicode61`, or `trigram` for substring-oriented Japanese/CJK search. Tokenizer metadata detects configuration changes and automatically rebuilds only FTS, preserving vector embeddings; unsupported values are rejected"
         commits: []
+      - description: "FTS-only CJK layout whitespace normalization joins words split by PDF/PPTX extraction, such as `製\n造プロセス`. Schema v10 stores normalized text in `chunks.fts_text`, preserving raw text, embeddings, hashes, English/mixed-script spaces, and result display; existing indexes migrate with an FTS-only rebuild"
+        commits: []
     fixed: []
     changed: []
     removed: []
     deprecated: []
     breaking: []
-    migration: "Existing indexes without FTS tokenizer metadata receive a one-time FTS-only rebuild on the next database open. No embedding regeneration is required for tokenizer changes."
+    migration: "Schema v9→v10 adds and backfills chunks.fts_text and rebuilds only FTS on the next database open. Missing or changed tokenizer/normalization metadata also triggers an FTS-only rebuild. Existing raw text, hashes, tags, and vector embeddings are preserved; no embedding regeneration is needed for these FTS changes."
     contributors: []
 
   - version: "1.4.2"

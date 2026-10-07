@@ -8,6 +8,8 @@ from kb.api import fts_core
 from kb.config import SCHEMA_VERSION, Config
 from kb.db import connect, fts_path, reset
 from kb.embed import serialize_f32
+from kb.fts import FTS_NORMALIZATION_VERSION
+from kb.ingest import md5_hash
 from kb.search import run_fts_query
 
 
@@ -786,6 +788,113 @@ class TestFtsTokenizer:
                 "SELECT rowid FROM fts_chunks WHERE fts_chunks MATCH '\"hello\"'"
             ).fetchone()[0]
             == chunk_id
+        )
+        conn.close()
+
+
+class TestFtsNormalizationMigration:
+    @pytest.mark.parametrize("tokenizer", ["porter unicode61", "trigram"])
+    def test_v9_to_v10_preserves_raw_text_hashes_and_vectors(
+        self, tmp_config, tokenizer
+    ):
+        tmp_config.embed_dims = 4
+        tmp_config.fts_tokenizer = tokenizer
+        conn = connect(tmp_config)
+        # Replace only the new chunks/FTS schema with the actual v9 definitions.
+        for trigger in ("fts_ai", "fts_ad", "fts_au"):
+            conn.execute(f"DROP TRIGGER {trigger}")
+        conn.execute("DROP TABLE fts_chunks")
+        conn.execute("DROP VIEW fts_chunks_content")
+        conn.execute("DROP TABLE chunks")
+        conn.execute("""
+            CREATE TABLE chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                doc_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                chunk_index INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                heading TEXT,
+                heading_ancestry TEXT,
+                char_count INTEGER,
+                content_hash TEXT,
+                doc_path TEXT DEFAULT '',
+                fts_path TEXT DEFAULT ''
+            )
+        """)
+        conn.execute(f"""
+            CREATE VIRTUAL TABLE fts_chunks USING fts5(
+                doc_path, heading, text, content='chunks', content_rowid='id',
+                tokenize='{tokenizer}'
+            )
+        """)
+        conn.executescript("""
+            CREATE TRIGGER fts_ai AFTER INSERT ON chunks BEGIN
+                INSERT INTO fts_chunks(rowid, doc_path, heading, text)
+                VALUES (new.id, new.fts_path, new.heading, new.text);
+            END;
+            CREATE TRIGGER fts_ad AFTER DELETE ON chunks BEGIN
+                INSERT INTO fts_chunks(fts_chunks, rowid, doc_path, heading, text)
+                VALUES ('delete', old.id, old.fts_path, old.heading, old.text);
+            END;
+            CREATE TRIGGER fts_au AFTER UPDATE ON chunks BEGIN
+                INSERT INTO fts_chunks(fts_chunks, rowid, doc_path, heading, text)
+                VALUES ('delete', old.id, old.fts_path, old.heading, old.text);
+                INSERT INTO fts_chunks(rowid, doc_path, heading, text)
+                VALUES (new.id, new.fts_path, new.heading, new.text);
+            END;
+        """)
+        conn.execute("UPDATE meta SET value = '9' WHERE key = 'schema_version'")
+        conn.execute("DELETE FROM meta WHERE key = 'fts_normalization_version'")
+        raw = "車両やロボットの製\n造プロセス・ライフサイクル"
+        path = "project/docs/layout.pdf"
+        conn.execute(
+            "INSERT INTO documents (path, type, content_hash, tags) "
+            "VALUES (?, 'pdf', ?, 'manual-tag')",
+            (path, md5_hash(raw)),
+        )
+        doc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            "INSERT INTO chunks (doc_id, chunk_index, text, content_hash, doc_path, fts_path) "
+            "VALUES (?, 0, ?, ?, ?, ?)",
+            (doc_id, raw, md5_hash(raw), path, fts_path(path)),
+        )
+        chunk_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            "INSERT INTO vec_chunks (chunk_id, embedding, chunk_text, doc_path, heading) "
+            "VALUES (?, ?, ?, ?, '')",
+            (chunk_id, serialize_f32([1.0, 0.0, 0.0, 0.0]), raw, path),
+        )
+        before = {
+            table: [dict(row) for row in conn.execute(f"SELECT * FROM {table}")]
+            for table in ("documents", "chunks", "vec_chunks")
+        }
+        assert run_fts_query(conn, "製造プロセス", 5) == []
+        conn.commit()
+        conn.close()
+
+        conn = connect(tmp_config)
+        after = {
+            table: [
+                {key: row[key] for key in row.keys() if key != "fts_text"}
+                for row in conn.execute(f"SELECT * FROM {table}")
+            ]
+            for table in before
+        }
+        assert after == before
+        assert conn.execute("SELECT fts_text FROM chunks").fetchone()[0] == raw.replace(
+            "製\n造", "製造"
+        )
+        assert bool(run_fts_query(conn, "製造プロセス", 5)) is (tokenizer == "trigram")
+        assert conn.execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'"
+        ).fetchone()[0] == str(SCHEMA_VERSION)
+        assert (
+            conn.execute(
+                "SELECT value FROM meta WHERE key = 'fts_normalization_version'"
+            ).fetchone()[0]
+            == FTS_NORMALIZATION_VERSION
+        )
+        conn.execute(
+            "INSERT INTO fts_chunks(fts_chunks, rank) VALUES('integrity-check', 1)"
         )
         conn.close()
 

@@ -6,6 +6,7 @@ from pathlib import Path
 import sqlite_vec
 
 from .config import SCHEMA_VERSION, Config
+from .fts import FTS_NORMALIZATION_VERSION, normalize_text_for_fts
 
 _FTS_TOKENIZERS = {"porter unicode61", "unicode61", "trigram"}
 
@@ -39,6 +40,9 @@ def connect(cfg: Config) -> sqlite3.Connection:
     cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(cfg.db_path))
     conn.row_factory = sqlite3.Row
+    conn.create_function(
+        "normalize_text_for_fts", 1, normalize_text_for_fts, deterministic=True
+    )
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")
     conn.enable_load_extension(True)
@@ -50,7 +54,10 @@ def connect(cfg: Config) -> sqlite3.Connection:
     needs_fts_rebuild = False
 
     if current < SCHEMA_VERSION:
-        if current == 8:
+        if current == 9:
+            # Non-destructive: add an FTS-only representation and rebuild FTS below.
+            needs_fts_rebuild = True
+        elif current == 8:
             # Vec0 used L2 distance — switch to cosine. Must drop+recreate vec_chunks.
             print(
                 f"Schema upgrade v{current} -> v{SCHEMA_VERSION}, switching vec0 to cosine distance..."
@@ -197,6 +204,11 @@ def connect(cfg: Config) -> sqlite3.Connection:
             )
             for table in ["vec_chunks", "fts_chunks", "chunks", "documents"]:
                 conn.execute(f"DROP TABLE IF EXISTS {table}")
+        if current >= 3:
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(chunks)")}
+            if "fts_text" not in columns:
+                conn.execute("ALTER TABLE chunks ADD COLUMN fts_text TEXT DEFAULT ''")
+            needs_fts_rebuild = True
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)",
             (str(SCHEMA_VERSION),),
@@ -222,6 +234,7 @@ def connect(cfg: Config) -> sqlite3.Connection:
             doc_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
             chunk_index INTEGER NOT NULL,
             text TEXT NOT NULL,
+            fts_text TEXT DEFAULT '',
             heading TEXT,
             heading_ancestry TEXT,
             char_count INTEGER,
@@ -268,21 +281,39 @@ def _ensure_fts_index(
         row = conn.execute(
             "SELECT value FROM meta WHERE key = 'fts_tokenizer'"
         ).fetchone()
+        normalization_row = conn.execute(
+            "SELECT value FROM meta WHERE key = 'fts_normalization_version'"
+        ).fetchone()
         fts_exists = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='fts_chunks'"
         ).fetchone()
-        if not fts_exists or row is None or row["value"] != tokenizer:
-            # Legacy indexes have no tokenizer metadata. Rebuild once rather than
-            # assume their tokenizer; all subsequent opens compare the stored value.
+        if (
+            needs_rebuild
+            or not fts_exists
+            or row is None
+            or row["value"] != tokenizer
+            or normalization_row is None
+            or normalization_row["value"] != FTS_NORMALIZATION_VERSION
+        ):
+            # Drop old triggers before backfilling derived text; old triggers may
+            # index raw text or fire on updates to the new FTS-only column.
+            for trigger in ("fts_ai", "fts_ad", "fts_au"):
+                conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
             conn.execute("DROP TABLE IF EXISTS fts_chunks")
+            conn.execute("UPDATE chunks SET fts_text = normalize_text_for_fts(text)")
             needs_rebuild = True
 
+        # External-content columns must map to the same text/path used by FTS.
+        conn.execute("""
+            CREATE VIEW IF NOT EXISTS fts_chunks_content AS
+            SELECT id, fts_path AS doc_path, heading, fts_text AS text FROM chunks
+        """)
         conn.execute(f"""
             CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks USING fts5(
                 doc_path,
                 heading,
                 text,
-                content='chunks',
+                content='fts_chunks_content',
                 content_rowid='id',
                 tokenize='{tokenizer}'
             )
@@ -294,34 +325,42 @@ def _ensure_fts_index(
         """)
         conn.execute("""
             CREATE TRIGGER IF NOT EXISTS fts_ai AFTER INSERT ON chunks BEGIN
+                UPDATE chunks SET fts_text = normalize_text_for_fts(new.text)
+                WHERE id = new.id;
                 INSERT INTO fts_chunks(rowid, doc_path, heading, text)
-                VALUES (new.id, new.fts_path, new.heading, new.text);
+                SELECT id, fts_path, heading, fts_text FROM chunks WHERE id = new.id;
             END
         """)
         conn.execute("""
             CREATE TRIGGER IF NOT EXISTS fts_ad AFTER DELETE ON chunks BEGIN
                 INSERT INTO fts_chunks(fts_chunks, rowid, doc_path, heading, text)
-                VALUES ('delete', old.id, old.fts_path, old.heading, old.text);
+                VALUES ('delete', old.id, old.fts_path, old.heading, old.fts_text);
             END
         """)
         conn.execute("""
-            CREATE TRIGGER IF NOT EXISTS fts_au AFTER UPDATE ON chunks BEGIN
+            CREATE TRIGGER IF NOT EXISTS fts_au
+            AFTER UPDATE OF text, heading, fts_path ON chunks BEGIN
                 INSERT INTO fts_chunks(fts_chunks, rowid, doc_path, heading, text)
-                VALUES ('delete', old.id, old.fts_path, old.heading, old.text);
+                VALUES ('delete', old.id, old.fts_path, old.heading, old.fts_text);
+                UPDATE chunks SET fts_text = normalize_text_for_fts(new.text)
+                WHERE id = new.id;
                 INSERT INTO fts_chunks(rowid, doc_path, heading, text)
-                VALUES (new.id, new.fts_path, new.heading, new.text);
+                SELECT id, fts_path, heading, fts_text FROM chunks WHERE id = new.id;
             END
         """)
         if needs_rebuild:
-            # Built-in 'rebuild' would use full chunks.doc_path. Preserve fts_path.
+            # Reuse the FTS-only rebuild path, preserving fts_path and fts_text.
             conn.execute("INSERT INTO fts_chunks(fts_chunks) VALUES('delete-all')")
             conn.execute(
                 "INSERT INTO fts_chunks(rowid, doc_path, heading, text) "
-                "SELECT id, fts_path, heading, text FROM chunks"
+                "SELECT id, fts_path, heading, fts_text FROM chunks"
             )
-        conn.execute(
-            "INSERT OR REPLACE INTO meta (key, value) VALUES ('fts_tokenizer', ?)",
-            (tokenizer,),
+        conn.executemany(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+            [
+                ("fts_tokenizer", tokenizer),
+                ("fts_normalization_version", FTS_NORMALIZATION_VERSION),
+            ],
         )
 
 
